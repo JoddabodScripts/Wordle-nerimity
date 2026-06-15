@@ -4,7 +4,10 @@
 .cursor
 .plandex-v2
 .idea
+<<<<<<< HEAD
 .vscode
 data
 node_modules
 .env.example.py
+=======
+>>>>>>> 298002c2b1d79bec035bd9c4aedeb79b1874f64b

@@ -1,6 +1,9 @@
 nerimity-sdk[cron]
 python-dotenv
 aiohttp
+<<<<<<< HEAD
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 pytest-mock>=3.10.0
+=======
+>>>>>>> 298002c2b1d79bec035bd9c4aedeb79b1874f64b
