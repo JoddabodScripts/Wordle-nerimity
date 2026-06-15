@@ -220,3 +220,7 @@ def get_user_event_solution(user_id: str, date_key: str, run_id: int = 0, event_
     seed = f"{date_key}:{user_id}:{run_id}:{event_key}"
     idx = _fnv1a32(seed) % len(pool)
     return pool[idx]
+
+def is_valid_word(word: str) -> bool:
+    """Check if a word is valid for Wordle gameplay."""
+    return word.upper() in WORDS
