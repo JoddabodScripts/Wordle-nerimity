@@ -1,0 +1,3 @@
+nerimity-sdk[cron]
+python-dotenv
+aiohttp
