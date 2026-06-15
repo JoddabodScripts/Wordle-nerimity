@@ -1,0 +1,10 @@
+.aider*
+.env
+.codex
+.cursor
+.plandex-v2
+.idea
+.vscode
+data
+node_modules
+.env.example.py
