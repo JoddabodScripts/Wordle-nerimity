@@ -8,7 +8,6 @@ Thank you for your interest in contributing to the Wordle Bot! This document pro
 - [Development Setup](#development-setup)
 - [Project Structure](#project-structure)
 - [Coding Standards](#coding-standards)
-- [Testing](#testing)
 - [Submitting Changes](#submitting-changes)
 - [Reporting Issues](#reporting-issues)
 
