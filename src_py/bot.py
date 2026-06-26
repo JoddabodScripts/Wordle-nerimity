@@ -13,7 +13,7 @@ from nerimity_sdk import Bot
 
 from game_logic import (
     start_or_get_game, start_new_game_run, start_hard_mode,
-    make_guess, use_hint, render_board, render_board_html, render_share_grid,
+    make_guess, use_hint, render_board, render_board_html,
     give_up_game, MAX_GUESSES, HINT_PENALTY, MIN_GUESSES_BEFORE_HINT,
     get_current_state_for_user, normalize_event_key, _CSS,
 )
@@ -21,7 +21,9 @@ from duel_store import (
     get_duel_for_user, create_duel, get_duel, end_duel, next_turn, DUEL_TIMEOUT,
 )
 from word_list import get_user_daily_solution
+
 from game_scoring import get_effective_guess_count
+
 from leaderboard_store import (
     cleanup_old_leaderboard_files, get_today_key,
     get_leaderboard_for_date, normalize_event_key as lb_normalize,
@@ -36,14 +38,21 @@ from leaderboard_message_store import (
     add_leaderboard_message, list_leaderboard_messages, prune_leaderboard_messages,
 )
 from stats import (
-    get_all_time_leaderboard_entries, get_current_streak,
-    get_user_stats, get_level, get_completed_puzzle_results_for_user,
+    get_all_time_leaderboard_entries,
+    get_user_stats, get_level,
 )
-from xp_store import check_and_apply_comeback_bonus
 from debug_store import lock_command, unlock_command, is_locked
 from forsaken_store import set_forsaken_date_key
 from max_level_store import has_been_notified, mark_notified
 from dm_channel_store import get_dm_channel_id, set_dm_channel_id
+from render import (
+    CREDITS_TAG, GENSHIN_ALIAS_HINT, FORSAKEN_ALIAS_HINT, VOCALOID_ALIAS_HINT,
+    _apply_comeback_bonus, _get_display_label, _get_level_for_user, _format_avg,
+    _get_event_meta, _format_genshin_status, _render_error_html, _render_help_html,
+    _render_leaderboard_html, _render_all_time_leaderboard_html, _render_my_stats_html,
+    _render_compare_html, _render_share_html, _render_server_leaderboard_html,
+    _render_duel_board_html, _evaluate_duel_guess,
+)
 
 BOT_TOKEN = os.environ.get("NERIMITY_TOKEN") or os.environ.get("NERIMITY_BOT_TOKEN", "")
 OWNER_USER_ID = os.environ.get("OWNER_USER_ID", "")
@@ -51,10 +60,6 @@ REMINDER_CHANNEL_ID = os.environ.get("REMINDER_CHANNEL_ID", "")
 REMINDER_CRON = os.environ.get("REMINDER_CRON", "0 3 * * *")
 DEBUG_CODE = "code"
 KEEP_ALIVE_CODE = "helloiamtheownercodejj"
-CREDITS_TAG = "[@:1750075711936438273]"
-GENSHIN_ALIAS_HINT = "Use 5-letter Genshin tags like `AYAKA`, `AYATO`, `HUTAO`, `KAZUH`, or `TARTA`."
-FORSAKEN_ALIAS_HINT = "Use 5-letter Forsaken tags like `NOOBB`, `SLASH`, `JOHND`, `JANEE`, or `NOSFE`."
-VOCALOID_ALIAS_HINT = "Use 5-letter Vocaloid tags like `MIKUU`, `TETOO`, `LUKAA`, `RINNN`, or `LENNN`."
 
 if not BOT_TOKEN:
     print("Missing NERIMITY_TOKEN in .env", file=sys.stderr)
@@ -68,363 +73,6 @@ if "message:button_clicked" not in _gw._GATEWAY_EVENTS:
 bot = Bot(token=BOT_TOKEN, prefix="/")
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-
-def _credits(text: str) -> str:
-    return f"{text}\n\nCredits: {CREDITS_TAG}"
-
-
-def _get_display_label(user, fallback: str = "unknown") -> str:
-    if not user:
-        return fallback
-    tag = getattr(user, "tag", None) or getattr(user, "discriminator", None)
-    name = getattr(user, "username", None) or fallback
-    return f"{name}:{tag}" if tag else name
-
-
-def _get_level_for_user(user_id: str, xp: int) -> dict:
-    if OWNER_USER_ID and str(user_id) == str(OWNER_USER_ID):
-        return {"level": "inf", "tier": "Owner", "xp": xp, "xpIntoLevel": 0, "xpNeeded": 1, "isMax": False}
-    return get_level(xp)
-
-
-def _format_avg(value) -> str:
-    if value is None or not isinstance(value, (int, float)) or not (value == value):
-        return "0.0"
-    return f"{value:.1f}"
-
-
-def _apply_comeback_bonus(user_id: str):
-    today = get_today_key()
-    results = get_completed_puzzle_results_for_user(user_id)
-    if not results:
-        return None
-    last_played = results[-1]["dateKey"]
-    if last_played >= today:
-        return None
-    fired = check_and_apply_comeback_bonus(user_id, last_played, today)
-    return "🎉 **Comeback Bonus!** You were away for a week — your XP this game is **2x**!" if fired else None
-
-
-def _get_event_meta(event_key: str):
-    norm = normalize_event_key(event_key)
-    return next((e for e in EVENTS if e["key"] == norm), None)
-
-
-def _format_genshin_status() -> str:
-    upd = get_genshin_update_date_key()
-    evt = get_genshin_event_date_key()
-    if not upd or not evt:
-        return "Genshin countdown data is unavailable right now."
-    return f"The next Genshin update is cached for **{upd}**, so the auto-Genshin day is **{evt}**."
-
-
-# ── HTML renderers ────────────────────────────────────────────────────────────
-
-_H = (
-    "<style>"
-    ".card{background:#1e1e2e;border-radius:10px;padding:20px;color:#cdd6f4;max-width:480px;min-height:400px}"
-    ".card-wide{background:#1e1e2e;border-radius:10px;padding:20px;color:#cdd6f4;max-width:600px;min-height:400px}"
-    ".title{font-size:18px;font-weight:700;margin-bottom:10px;color:#cba6f7}"
-    ".cmd{color:#89b4fa;font-weight:600}"
-    ".row{padding:5px 0}"
-    ".lbl{color:#a6adc8;font-size:13px}"
-    ".val{color:#cdd6f4;font-size:13px;font-weight:600}"
-    ".section{margin-top:12px}"
-    ".sh{font-size:13px;font-weight:700;color:#f38ba8;margin-bottom:4px}"
-    ".tier{color:#fab387;font-size:12px}"
-    ".win{color:#a6e3a1}"
-    ".lose{color:#f38ba8}"
-    ".streak{color:#fab387}"
-    ".hard{color:#cba6f7}"
-    ".xp{color:#f9e2af}"
-    ".dim{color:#6c7086;font-size:12px}"
-    "</style>"
-)
-_S = {
-    "card": "card", "title": "title", "cmd": "cmd", "row": "row",
-    "lbl": "lbl", "val": "val", "section": "section", "sh": "sh",
-    "tier": "tier", "win": "win", "lose": "lose", "streak": "streak",
-    "hard": "hard", "xp": "xp", "dim": "dim",
-}
-
-
-def _h(tag: str, cls: str, content: str) -> str:
-    return f'<{tag} class="{cls}">{content}</{tag}>'
-
-
-def _render_error_html(message: str) -> str:
-    """Render an error message as HTML to avoid pinging with credits."""
-    return (
-        f'{_H}<div class="card">'
-        f'<div class="title">❌ Error</div>'
-        f'<div class="lbl">{message}</div>'
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-    )
-
-
-def _render_help_html() -> str:
-    import html as _html
-    e = _html.escape
-    event_cmds = [
-        (f"/{ev['command']}", f"Play the {ev['title']} special Wordle")
-        for ev in EVENTS
-    ]
-    main_cmds = [
-        ("/wordle", "Start or view today's puzzle"),
-        ("/answer &lt;word&gt;", "Submit a 5-letter guess"),
-        (f"/hint", f"After {MIN_GUESSES_BEFORE_HINT} guesses, reveal 1 letter (costs {HINT_PENALTY} guesses)"),
-        ("/hard", "Hard mode — 2x XP, no hints, must reuse confirmed letters"),
-        ("/giveup", "Surrender and reveal the word"),
-        ("/share", "Post a spoiler-free emoji grid"),
-        ("/challenge @user", "Ping someone to play"),
-        ("/versus @user", "1v1 Wordle duel (turn-based, no XP)"),
-        ("/duelguess &lt;word&gt;", "Make your guess in an active duel"),
-        ("/leaderboard", "Today's leaderboard"),
-        ("/alltimeleaderboard", "Hall of fame"),
-        ("/mystats", "Your personal stats"),
-        *event_cmds,
-    ]
-    rows = "".join(
-        f'<div class="row"><span class="cmd">{c}</span> <span class="lbl">— {d}</span></div>'
-        for c, d in main_cmds
-    )
-    return (
-        f'{_H}<div class="card">'
-        f'<div class="title">📘 Commands</div>{rows}'
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div>'
-        f'</div>'
-    )
-
-
-def _render_leaderboard_html(date_key: str, event_key: str = "") -> str:
-    norm = lb_normalize(event_key)
-    entries = get_leaderboard_for_date(date_key, norm)
-    meta = _get_event_meta(norm)
-    title = f"{'🏆 ' + meta['title'] + ' Leaderboard' if meta else '🏆 Leaderboard'} — {date_key}"
-    play_cmd = f"/{meta['command']}" if meta else "/wordle"
-    if not entries:
-        return (
-            f'{_H}<div class="card">'
-            f'<div class="title">{title}</div>'
-            f'<div class="lbl">No results yet. Play with <span class="cmd">{play_cmd}</span>.</div>'
-            f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-        )
-    rows = []
-    for idx, r in enumerate(entries[:50]):
-        score = f"{r['guesses']}/{MAX_GUESSES}" if r["status"] == "won" else f"X/{MAX_GUESSES}"
-        won = r["status"] == "won"
-        hard = ' <span class="hard">🔒</span>' if r.get("hardMode") else ""
-        label = r.get("displayName") or r.get("userId", "?")
-        streak = get_current_streak(r["userId"], norm)
-        streak_sfx = f' <span class="streak">🔥{streak}</span>' if streak > 0 else ""
-        score_style = "color:#a6e3a1" if won else "color:#f38ba8"
-        rows.append(
-            f'<div class="row">'
-            f'<span class="lbl">{idx+1}. {label}</span>'
-            f'<span><span style="{score_style}">{score}</span>{hard}{streak_sfx}</span>'
-            f'</div>'
-        )
-    return (
-        f'{_H}<div class="card">'
-        f'<div class="title">{title}</div>'
-        + "".join(rows) +
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-    )
-
-
-async def _get_live_display_name(user_id: str) -> str:
-    user = bot.cache.users.get(user_id)
-    if user:
-        tag = getattr(user, "tag", "") or ""
-        name = getattr(user, "username", "") or user_id
-        return f"{name}:{tag}" if tag else name
-    try:
-        data = await bot.rest.fetch_user(user_id)
-        print(f"[FETCH_USER] {user_id} -> {data}")
-        # API may return {user: {...}} or the user dict directly
-        if "user" in data:
-            data = data["user"]
-        tag = data.get("tag", "") or ""
-        name = data.get("username", "") or user_id
-        return f"{name}:{tag}" if tag else name
-    except Exception:
-        return user_id
-
-
-def _render_all_time_leaderboard_html(live_names: dict = None) -> str:
-    entries = get_all_time_leaderboard_entries()
-    card = "background:#1e1e2e;border-radius:10px;padding:16px;color:#cdd6f4"
-    if not entries:
-        return (
-            f'<div style="{card}">'
-            f'<div class="title">🏛️ All-Time Leaderboard</div>'
-            f'<div class="lbl">No entries yet. Play with <b>/wordle</b>.</div>'
-            f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-        )
-    rows = []
-    for idx, e in enumerate(entries[:20]):
-        avg = "-" if e["averageGuesses"] is None else _format_avg(e["averageGuesses"])
-        lv = _get_level_for_user(e["userId"], e.get("xp", 0))
-        streak = f' 🔥{e["currentStreak"]}' if e["currentStreak"] > 0 else ""
-        hard = f' 🔒{e["hardWins"]}' if e["hardWins"] > 0 else ""
-        name = (live_names or {}).get(e["userId"]) or e["displayName"]
-        rows.append(
-            f'<div style="padding:3px 0;font-size:13px">'
-            f'<b>{idx+1}. {name}</b> '
-            f'<span class="streak">Lv.{lv["level"]} {lv["tier"]}</span> '
-            f'<span class="win">🏆{e["wins"]}W {round(e["winRate"])}%</span> '
-            f'avg{avg}{streak}{hard} '
-            f'<span class="xp">✨{e.get("xp",0)}</span>'
-            f'</div>'
-        )
-    return (
-        f'<div style="{card}">'
-        f'<div class="title">🏛️ All-Time Leaderboard</div>'
-        + "".join(rows) +
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-    )
-
-
-def _render_my_stats_html(user, streak_event_key: str = "") -> str:
-    label = _get_display_label(user, getattr(user, "id", "unknown"))
-    stats = get_user_stats(str(user.id), streak_event_key)
-    lv = _get_level_for_user(str(user.id), stats["xp"])
-    is_owner = OWNER_USER_ID and str(user.id) == str(OWNER_USER_ID)
-    if not stats["gamesPlayed"]:
-        return (
-            f'{_H}<div class="card">'
-            f'<div class="title">📊 {label}</div>'
-            f'<div class="lbl">No completed games yet. Play with <span class="cmd">/wordle</span>!</div>'
-            f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-        )
-    if is_owner:
-        xp_str = "MAX"
-    elif lv["isMax"]:
-        xp_str = f'{stats["xp"]} (MAX)'
-    else:
-        xp_str = f'{stats["xp"]} ({lv["xpIntoLevel"]}/{lv["xpNeeded"]} to next)'
-    best_mode = (
-        f'{stats["bestMode"]["title"]} (avg {_format_avg(stats["bestMode"]["avgGuesses"])})'
-        if stats.get("bestMode") else "No wins yet"
-    )
-    fields = [
-        ("🏅 Level", f'{lv["level"]} — {lv["tier"]}', "tier"),
-        ("✨ XP", xp_str, "xp"),
-        ("🎮 Played", str(stats["gamesPlayed"]), "val"),
-        ("✅ Win Rate", f'{round(stats["winRate"])}%', "win"),
-        ("🔒 Hard Wins", str(stats["hardWins"]), "hard"),
-        ("📈 Avg Guesses", _format_avg(stats["averageGuesses"]), "val"),
-        ("🔥 Streak", str(stats["currentStreak"]), "streak"),
-        ("🏆 Best Streak", str(stats["bestStreak"]), "streak"),
-        ("💀 Total Fails", str(stats["totalFails"]), "lose"),
-        ("⭐ Best Mode", best_mode, "val"),
-    ]
-    rows = "".join(
-        f'<div class="row"><span class="lbl">{k}</span><span class="{cls}">{v}</span></div>'
-        for k, v, cls in fields
-    )
-    return (
-        f'{_H}<div class="card">'
-        f'<div class="title">📊 {label}</div>'
-        + rows +
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-    )
-
-
-def _render_compare_html(my_id: str, my_label: str, my_stats: dict,
-                         their_id: str, their_label: str, their_stats: dict) -> str:
-    """Render a side-by-side stats comparison."""
-    my_lv = _get_level_for_user(my_id, my_stats["xp"])
-    their_lv = _get_level_for_user(their_id, their_stats["xp"])
-
-    def _winner(my_val, their_val, higher_is_better=True):
-        # Handle special cases (None, "inf", string levels)
-        if my_val == their_val:
-            return "tie", "tie"
-        # Convert to comparable values
-        try:
-            my_cmp = float('inf') if my_val == 'inf' or my_val == "inf" else float(my_val) if my_val is not None else -float('inf')
-            their_cmp = float('inf') if their_val == 'inf' or their_val == "inf" else float(their_val) if their_val is not None else -float('inf')
-        except (ValueError, TypeError):
-            return "tie", "tie"
-
-        if my_cmp == their_cmp:
-            return "tie", "tie"
-        if higher_is_better:
-            return ("win", "lose") if my_cmp > their_cmp else ("lose", "win")
-        return ("win", "lose") if my_cmp < their_cmp else ("lose", "win")
-
-    # Calculate winners for each stat
-    my_wr = round(my_stats["winRate"])
-    their_wr = round(their_stats["winRate"])
-    wr_result = _winner(my_wr, their_wr, True)
-
-    my_avg = my_stats["averageGuesses"] if my_stats["averageGuesses"] else 999
-    their_avg = their_stats["averageGuesses"] if their_stats["averageGuesses"] else 999
-    avg_result = _winner(my_avg, their_avg, False)
-
-    streak_result = _winner(my_stats["currentStreak"], their_stats["currentStreak"], True)
-    best_streak_result = _winner(my_stats["bestStreak"], their_stats["bestStreak"], True)
-    level_result = _winner(my_lv["level"], their_lv["level"], True)
-
-    def _stat_row(label, my_value, their_value, my_class, their_class):
-        return (
-            f'<div class="row" style="display:flex;justify-content:space-between;padding:8px 0">'
-            f'<span class="{my_class}" style="flex:1;text-align:left">{my_value}</span>'
-            f'<span class="lbl" style="flex:1;text-align:center;font-weight:600">{label}</span>'
-            f'<span class="{their_class}" style="flex:1;text-align:right">{their_value}</span>'
-            f'</div>'
-        )
-
-    rows = [
-        _stat_row("🏅 Level", f'{my_lv["level"]} {my_lv["tier"]}', f'{their_lv["level"]} {their_lv["tier"]}',
-                  level_result[0], level_result[1]),
-        _stat_row("✨ XP", str(my_stats["xp"]), str(their_stats["xp"]),
-                  "xp", "xp"),
-        _stat_row("✅ Win Rate", f'{my_wr}%', f'{their_wr}%',
-                  wr_result[0], wr_result[1]),
-        _stat_row("📈 Avg Guesses", _format_avg(my_stats["averageGuesses"]), _format_avg(their_stats["averageGuesses"]),
-                  avg_result[0], avg_result[1]),
-        _stat_row("🔥 Streak", str(my_stats["currentStreak"]), str(their_stats["currentStreak"]),
-                  streak_result[0], streak_result[1]),
-        _stat_row("🏆 Best Streak", str(my_stats["bestStreak"]), str(their_stats["bestStreak"]),
-                  best_streak_result[0], best_streak_result[1]),
-        _stat_row("🎮 Games Played", str(my_stats["gamesPlayed"]), str(their_stats["gamesPlayed"]),
-                  "val", "val"),
-        _stat_row("🔒 Hard Wins", str(my_stats["hardWins"]), str(their_stats["hardWins"]),
-                  "hard", "hard"),
-    ]
-
-    return (
-        f'{_H}<div style="display:flex;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;">'
-        f'<div style="width:4px;background:#cba6f7;flex-shrink:0;border-radius:5px 0px 0px 5px;"></div>'
-        f'<div style="padding:16px;background:#1e1e2e;flex:1;border-radius:0px 5px 5px 0px;min-width:400px;">'
-        f'<div class="title">⚔️ Stats Comparison</div>'
-        f'<div style="display:flex;justify-content:space-between;margin:10px 0;padding:10px;background:#181825;border-radius:5px">'
-        f'<span class="lbl" style="font-weight:700;color:#89b4fa">{my_label}</span>'
-        f'<span class="lbl" style="font-weight:700;color:#f38ba8">{their_label}</span>'
-        f'</div>'
-        + "".join(rows) +
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div>'
-        f'</div></div>'
-    )
-
-
-def _render_share_html(game: dict) -> str:
-    from game_scoring import get_hint_penalty_count
-    # render_share_grid returns "Wordle DATE score\n\nemoji\nemoji..."
-    grid_text = render_share_grid(game)
-    lines = grid_text.split("\n")
-    headline = lines[0]  # "Wordle 2026-04-14 3/6"
-    emoji_rows = lines[2:]  # skip blank line
-    grid_html = "".join(f'<div style="font-size:22px">{r}</div>' for r in emoji_rows if r)
-    return (
-        f'{_H}<div class="card">'
-        f'<div class="title">{headline}</div>'
-        f'{grid_html}'
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-    )
 
 
 async def _refresh_leaderboard_messages(date_key: str, event_key: str = "") -> None:
@@ -797,51 +445,6 @@ async def cmd_challenge(ctx):
     )})
 
 
-def _render_server_leaderboard_html(date_key: str, event_key: str, member_ids: set) -> str:
-    norm = lb_normalize(event_key)
-    all_entries = get_leaderboard_for_date(date_key, norm)
-    entries = [r for r in all_entries if r.get("userId") in member_ids]
-    title = f"🏠 Server Leaderboard — {date_key}"
-    if not entries:
-        return (
-            f'{_H}<div class="card">'
-            f'<div class="title">{title}</div>'
-            f'<div class="lbl">No server members have played today yet.</div>'
-            f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-        )
-    rows = []
-    for idx, r in enumerate(entries[:50]):
-        score = f"{r['guesses']}/{MAX_GUESSES}" if r["status"] == "won" else f"X/{MAX_GUESSES}"
-        won = r["status"] == "won"
-        hard = ' <span class="hard">🔒</span>' if r.get("hardMode") else ""
-        label = r.get("displayName") or r.get("userId", "?")
-        streak = get_current_streak(r["userId"], norm)
-        streak_sfx = f' <span class="streak">🔥{streak}</span>' if streak > 0 else ""
-        score_style = "color:#a6e3a1" if won else "color:#f38ba8"
-        rows.append(
-            f'<div class="row">'
-            f'<span class="lbl">{idx+1}. {label}</span>'
-            f'<span><span style="{score_style}">{score}</span>{hard}{streak_sfx}</span>'
-            f'</div>'
-        )
-    return (
-        f'{_H}<div class="card">'
-        f'<div class="title">{title}</div>'
-        + "".join(rows) +
-        f'<div class="dim" style="margin-top:10px">Credits: {CREDITS_TAG}</div></div>'
-    )
-
-
-def _lb_buttons(date_key: str, event_key: str) -> list:
-    d = date_key.replace("-", "")
-    e = re.sub(r"[^a-z0-9]", "", event_key)
-    return [
-        {"id": f"lb_g_{d}_{e}", "label": "🌍 Global"},
-        {"id": f"lb_s_{d}_{e}", "label": "🏠 Server"},
-        {"id": f"lb_a_{d}_{e}", "label": "🏛️ Hall of Fame"},
-    ]
-
-
 @bot.command("leaderboard", description="Show today's leaderboard")
 async def cmd_leaderboard(ctx):
     user_id = str(ctx.author.id)
@@ -991,58 +594,6 @@ for _ev in EVENTS:
 
 
 # ── duel helpers ─────────────────────────────────────────────────────────────
-
-def _evaluate_duel_guess(word: str, guess: str) -> list:
-    """Same feedback logic as the main game."""
-    result = [{"letter": g, "result": "absent"} for g in guess]
-    remaining = list(word)
-    for i in range(5):
-        if guess[i] == word[i]:
-            result[i]["result"] = "correct"
-            remaining[i] = None
-    for i in range(5):
-        if result[i]["result"] != "correct" and guess[i] in remaining:
-            result[i]["result"] = "present"
-            remaining[remaining.index(guess[i])] = None
-    return result
-
-
-_DUEL_CLS = {"correct": "c", "present": "p", "absent": "a"}
-
-def _render_duel_board_html(duel: dict, pov_user: str) -> str:
-    word = duel["word"]
-    p1, p2 = duel["player1"], duel["player2"]
-    me = pov_user
-    opp = p2 if me == p1 else p1
-
-    def board_rows(user_id):
-        rows = []
-        for guess in duel["boards"][user_id]:
-            fb = _evaluate_duel_guess(word, guess)
-            tiles = "".join(
-                f'<div class="wt {_DUEL_CLS.get(fb[i]["result"], "a")}">{fb[i]["letter"]}</div>'
-                for i in range(5)
-            )
-            rows.append(f'<div class="wr">{tiles}</div>')
-        for _ in range(len(duel["boards"][user_id]), MAX_GUESSES):
-            rows.append(f'<div class="wr">{"<div class=\"wt e\"></div>" * 5}</div>')
-        return "".join(rows)
-
-    my_label = "You"
-    opp_label = f"[@:{opp}]"
-    turn_note = "Your turn!" if duel["turn"] == me else f"[@:{opp}]'s turn"
-
-    return (
-        f'{_CSS}'
-        f'<div style="display:flex;gap:16px;align-items:flex-start">'
-        f'<div><div style="font-size:13px;font-weight:700;color:#cba6f7;margin-bottom:4px">{my_label}</div>'
-        f'<div class="wb">{board_rows(me)}</div></div>'
-        f'<div><div style="font-size:13px;font-weight:700;color:#f38ba8;margin-bottom:4px">{opp_label}</div>'
-        f'<div class="wb">{board_rows(opp)}</div></div>'
-        f'</div>'
-        f'<div style="font-size:13px;color:#a6adc8;margin-top:8px">{turn_note} · /duelguess WORD to play · /giveup to forfeit</div>'
-    )
-
 
 async def _duel_timeout(duel: dict, channel_id: str, loser_id: str):
     await asyncio.sleep(DUEL_TIMEOUT)
